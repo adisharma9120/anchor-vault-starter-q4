@@ -1,138 +1,116 @@
-use anchor_lang::{
-    prelude::*,
-    system_program::{transfer, Transfer},
-};
+use anchor_lang::prelude::*;
+use anchor_lang::system_program::{self, CreateAccount, Transfer};
 
 declare_id!("7D9c2HFgZwyZxjQYujKZ4QZmzXihrBKqVVvzDC8jeNPw");
-
 
 #[program]
 pub mod anchor_vault_q4_25 {
     use super::*;
 
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
-        ctx.accounts.initialize(&ctx.bumps)
+        // Save bumps
+        ctx.accounts.vault_state.vault_bump = ctx.bumps.vault;
+        ctx.accounts.vault_state.state_bump = ctx.bumps.vault_state;
+
+        // Rent-exempt balance for vault
+        let rent = Rent::get()?;
+        let lamports = rent.minimum_balance(0);
+
+        // ---- IMPORTANT: lifetime-safe bindings ----
+        let vault_state_key = ctx.accounts.vault_state.key();
+        let vault_bump = ctx.bumps.vault;
+
+        let vault_seeds: &[&[u8]] = &[
+            b"vault",
+            vault_state_key.as_ref(),
+            &[vault_bump],
+        ];
+
+        let signer_seeds: &[&[&[u8]]] = &[vault_seeds];
+        // -------------------------------------------
+
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.system_program.to_account_info(),
+            CreateAccount {
+                from: ctx.accounts.user.to_account_info(),
+                to: ctx.accounts.vault.to_account_info(),
+            },
+            signer_seeds,
+        );
+
+        system_program::create_account(
+            cpi_ctx,
+            lamports,
+            0, // no data, SOL-only vault
+            &system_program::ID,
+        )?;
+
+        Ok(())
     }
 
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
-        ctx.accounts.deposit(amount)
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.user.to_account_info(),
+                to: ctx.accounts.vault.to_account_info(),
+            },
+        );
+
+        system_program::transfer(cpi_ctx, amount)?;
+        Ok(())
     }
-
-    // pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
-    //     ctx.accounts.withdraw(amount)
-    // }
-
-    // pub fn close(ctx: Context<Close>) -> Result<()> {
-    //     ctx.accounts.close()
-    // }
 }
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
+
     #[account(
         init,
         payer = user,
-        seeds = [b"state", user.key().as_ref()], 
+        seeds = [b"state", user.key().as_ref()],
         bump,
-        space = VaultState::DISCRIMINATOR.len() + VaultState::INIT_SPACE,
+        space = 8 + VaultState::INIT_SPACE
     )]
     pub vault_state: Account<'info, VaultState>,
+
+    /// CHECK: Vault PDA (created manually via CPI)
     #[account(
         mut,
         seeds = [b"vault", vault_state.key().as_ref()],
-        bump,
+        bump
     )]
-    pub vault: SystemAccount<'info>,
+    pub vault: UncheckedAccount<'info>,
+
     pub system_program: Program<'info, System>,
-}
-
-impl<'info> Initialize<'info> {
-    pub fn initialize(&mut self, bumps: &InitializeBumps) -> Result<()> {
-        // Get the amount of lamports needed to make the vault rent exempt
-        let rent_exempt = Rent::get()?.minimum_balance(self.vault.to_account_info().data_len());
-
-        // Transfer the rent-exempt amount from the user to the vault
-        let cpi_program = self.system_program.to_account_info();
-        let cpi_accounts = Transfer {
-            from: self.user.to_account_info(),
-            to: self.vault.to_account_info(),
-        };
-
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-
-        transfer(cpi_ctx, rent_exempt)?;
-
-        self.vault_state.vault_bump = bumps.vault;
-        self.vault_state.state_bump = bumps.vault_state;
-
-        Ok(())
-    }
 }
 
 #[derive(Accounts)]
 pub struct Deposit<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
+
+    /// CHECK: Vault PDA
     #[account(
         mut,
-        seeds = [b"vault", vault_state.key().as_ref()], 
-        bump = vault_state.vault_bump,
+        seeds = [b"vault", vault_state.key().as_ref()],
+        bump = vault_state.vault_bump
     )]
-    pub vault: SystemAccount<'info>,
+    pub vault: UncheckedAccount<'info>,
+
     #[account(
         seeds = [b"state", user.key().as_ref()],
-        bump = vault_state.state_bump,
+        bump = vault_state.state_bump
     )]
     pub vault_state: Account<'info, VaultState>,
+
     pub system_program: Program<'info, System>,
 }
 
-impl<'info> Deposit<'info> {
-    pub fn deposit(&mut self, amount: u64) -> Result<()> {
-        let cpi_program = self.system_program.to_account_info();
-
-        let cpi_accounts = Transfer {
-            from: self.user.to_account_info(),
-            to: self.vault.to_account_info(),
-        };
-
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-
-        transfer(cpi_ctx, amount)?;
-
-        Ok(())
-    }
-}
-
-// #[derive(Accounts)]
-// pub struct Withdraw<'info> {
-// TODO: Implement Withdraw accounts
-// }
-
-// impl<'info> Withdraw<'info> {
-//     pub fn withdraw(&mut self, _amount: u64) -> Result<()> {
-//         TODO: Implement withdraw
-
-//         Ok(())
-//     }
-// }
-
-// #[derive(Accounts)]
-// pub struct Close<'info> {
-//      TODO: Implement Close accounts
-// }
-
-// impl<'info> Close<'info> {
-//     pub fn close(&mut self) -> Result<()> {
-//          TODO: Implement close
-//         Ok(())
-//     }
-// }
-
-#[derive(InitSpace)]
 #[account]
+#[derive(InitSpace)]
 pub struct VaultState {
     pub vault_bump: u8,
     pub state_bump: u8,
